@@ -54,7 +54,7 @@ class DeduplicationCache:
         if raw is not None:
             self._hits += 1
             record_cache_hit()
-            logger.debug("cache_hit", event="cache_hit", key=key)
+            logger.debug("cache_hit", key=key)
             _PROCESSED_COUNT += 1
             self._maybe_log_rate()
             return json.loads(raw)
@@ -86,7 +86,6 @@ class DeduplicationCache:
         if _PROCESSED_COUNT % _LOG_EVERY_N == 0:
             logger.info(
                 "cache_hit_rate",
-                event="cache_hit_rate",
                 processed=_PROCESSED_COUNT,
                 hit_rate=round(self.hit_rate, 4),
                 hits=self._hits,

@@ -74,18 +74,10 @@ class TestOpenState:
         assert cb.state == CBState.OPEN
 
         await asyncio.sleep(cb._recovery_timeout + 0.1)
-        # _maybe_transition is called inside cb.call
-        with pytest.raises(CircuitBreakerOpenError):
-            # First call after sleep should have transitioned to HALF_OPEN
-            # but the probe itself might succeed or fail
-            pass
-        # Force a call to trigger transition
-        try:
-            await cb.call(_ok)
-        except Exception:
-            pass
-        # After timeout the state should be HALF_OPEN or CLOSED (if probe succeeded)
-        assert cb.state in (CBState.HALF_OPEN, CBState.CLOSED)
+        # Recovery path: HALF_OPEN allows one probe; success closes circuit
+        result = await cb.call(_ok)
+        assert result == "ok"
+        assert cb.state == CBState.CLOSED
 
 
 class TestHalfOpenState:

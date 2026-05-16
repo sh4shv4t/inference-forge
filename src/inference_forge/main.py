@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
       - SarvamCaller, DeduplicationCache, JobStore singletons
     """
     configure_logging()
-    logger.info("startup", event="startup", version=__version__)
+    logger.info("startup", version=__version__)
 
     # Redis — main client (commands + publish)
     redis_client = aioredis.from_url(
@@ -52,9 +52,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Verify connectivity
     try:
         await redis_client.ping()
-        logger.info("redis_connected", event="redis_connected", url=settings.redis_url)
+        logger.info("redis_connected", url=settings.redis_url)
     except Exception as exc:
-        logger.error("redis_connection_failed", event="redis_connection_failed", error=str(exc))
+        logger.error("redis_connection_failed", error=str(exc))
         raise
 
     # Shared httpx client
@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield  # ← application runs here
 
     # Shutdown
-    logger.info("shutdown", event="shutdown")
+    logger.info("shutdown")
     await http_client.aclose()
     await redis_client.aclose()
     await sub_redis_client.aclose()

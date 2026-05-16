@@ -58,7 +58,7 @@ Client GET /results/{job_id} ←  Redis HGET + JSON
 ## Quick Start
 
 ```bash
-git clone https://github.com/your-org/inference-forge
+git clone https://github.com/sh4shv4t/inference-forge
 cp .env.example .env          # Add your SARVAM_API_KEY
 make docker-up                # Starts inference-forge + Redis + Prometheus + Grafana
 ```

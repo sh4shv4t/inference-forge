@@ -146,7 +146,6 @@ async def _process_job(
 
             logger.info(
                 "batch_complete",
-                event="batch_complete",
                 job_id=job_id,
                 batch_size=len(batch.tickets),
                 bucket=batch.complexity.value,
@@ -182,7 +181,6 @@ async def _process_job(
 
         logger.info(
             "job_complete",
-            event="job_complete",
             job_id=job_id,
             total=total_tickets,
             completed=completed,
@@ -192,7 +190,7 @@ async def _process_job(
         )
 
     except Exception as exc:
-        logger.exception("job_failed", event="job_failed", job_id=job_id, error=str(exc))
+        logger.exception("job_failed", job_id=job_id, error=str(exc))
         await job_store.fail(job_id, reason=str(exc))
     finally:
         _active_job_count -= 1
@@ -271,7 +269,6 @@ async def process_tickets(body: ProcessRequest, request: Request) -> ProcessResp
     queue_depth.set(unique)
     logger.info(
         "job_submitted",
-        event="job_submitted",
         job_id=job_id,
         total=total,
         cached=cached_count,

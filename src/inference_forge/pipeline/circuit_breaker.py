@@ -188,7 +188,6 @@ class CircuitBreaker:
 
         logger.warning(
             "circuit_breaker_transition",
-            event="circuit_breaker_transition",
             from_state=old_state.value,
             to_state=new_state.value,
             failure_count=len(self._failure_timestamps),

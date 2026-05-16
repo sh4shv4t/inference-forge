@@ -1,6 +1,11 @@
 """Shared pytest fixtures for inference-forge tests."""
 from __future__ import annotations
 
+import os
+
+# Settings() loads at import time; tests must not require a real .env file.
+os.environ.setdefault("SARVAM_API_KEY", "test-key-for-pytest")
+
 import asyncio
 import json
 from typing import Any

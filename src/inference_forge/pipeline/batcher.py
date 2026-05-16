@@ -62,7 +62,6 @@ class PriorityBatcher:
         queue_depth.set(self._queue.qsize())
         logger.debug(
             "tickets_enqueued",
-            event="tickets_enqueued",
             count=len(tickets),
             queue_size=self._queue.qsize(),
         )

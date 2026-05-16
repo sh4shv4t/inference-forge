@@ -69,7 +69,7 @@ class JobStore:
             },
         )
         await self._redis.expire(key, settings.job_ttl_seconds)
-        logger.info("job_created", event="job_created", job_id=job_id, total=total)
+        logger.info("job_created", job_id=job_id, total=total)
 
     async def start(self, job_id: str) -> None:
         key = _job_key(job_id)
@@ -103,7 +103,7 @@ class JobStore:
         pipe.set(results_key, json.dumps(results, ensure_ascii=False))
         pipe.expire(results_key, settings.job_ttl_seconds)
         await pipe.execute()
-        logger.info("job_finished", event="job_finished", job_id=job_id, result_count=len(results))
+        logger.info("job_finished", job_id=job_id, result_count=len(results))
 
     async def fail(self, job_id: str, reason: str = "") -> None:
         key = _job_key(job_id)

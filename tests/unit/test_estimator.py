@@ -17,7 +17,8 @@ class TestETAEstimator:
         est = ETAEstimator(default_latency_s=1.2)
         # 10 simple tickets → ceil(10/20) = 1 batch × 1.2s = 1.2s
         result = est.estimate(10, Complexity.SIMPLE)
-        assert result == pytest.approx(1.2 * (10 / 20), rel=0.01)
+        # estimate uses max(1, remaining/group_size) batches
+        assert result == pytest.approx(1.2, rel=0.01)
 
     def test_ewma_updates_on_first_observation(self) -> None:
         est = ETAEstimator()

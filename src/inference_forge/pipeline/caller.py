@@ -76,7 +76,6 @@ async def _single_api_call(
     t_hash = ticket_hash(ticket)
     logger.info(
         "api_call",
-        event="api_call",
         ticket_hash=t_hash,
         attempt=attempt,
         latency_ms=round(elapsed_ms, 2),
@@ -121,7 +120,6 @@ async def _call_with_retry(
         except CircuitBreakerOpenError as exc:
             logger.warning(
                 "circuit_breaker_rejected",
-                event="circuit_breaker_rejected",
                 ticket_hash=ticket_hash(ticket),
                 attempt=attempt,
             )
@@ -136,7 +134,6 @@ async def _call_with_retry(
             if status_code in FATAL_STATUS_CODES:
                 logger.error(
                     "api_fatal_error",
-                    event="api_fatal_error",
                     ticket_hash=ticket_hash(ticket),
                     status_code=status_code,
                 )
@@ -147,7 +144,6 @@ async def _call_with_retry(
                 wait = float(retry_after) if retry_after else _jittered(_BACKOFF_SCHEDULE[attempt - 1])
                 logger.warning(
                     "rate_limited",
-                    event="rate_limited",
                     ticket_hash=ticket_hash(ticket),
                     wait_s=round(wait, 2),
                 )
@@ -168,7 +164,6 @@ async def _call_with_retry(
             # Model returned malformed JSON — retry
             logger.warning(
                 "malformed_json_response",
-                event="malformed_json_response",
                 ticket_hash=ticket_hash(ticket),
                 attempt=attempt,
             )
@@ -180,7 +175,6 @@ async def _call_with_retry(
         except Exception as exc:
             logger.exception(
                 "unexpected_api_error",
-                event="unexpected_api_error",
                 ticket_hash=ticket_hash(ticket),
                 attempt=attempt,
             )
@@ -191,7 +185,6 @@ async def _call_with_retry(
 
     logger.error(
         "max_retries_exceeded",
-        event="max_retries_exceeded",
         ticket_hash=ticket_hash(ticket),
         attempts=settings.max_retries,
     )

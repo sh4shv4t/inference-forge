@@ -1,0 +1,52 @@
+[tool.poetry]
+name = "inference-forge"
+version = "0.1.0"
+description = "Production-grade async batch inference pipeline for Sarvam AI"
+authors = ["Shashvat Singh"]
+readme = "README.md"
+packages = [{ include = "inference_forge", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = ">=0.111"
+uvicorn = { version = ">=0.29", extras = ["standard"] }
+httpx = { version = ">=0.27", extras = ["http2"] }
+redis = { version = ">=5.0", extras = ["asyncio"] }
+pydantic = ">=2.7"
+pydantic-settings = ">=2.2"
+structlog = ">=24.1"
+prometheus-client = ">=0.20"
+python-dotenv = ">=1.0"
+numpy = ">=1.26"
+rich = ">=13.7"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.1"
+pytest-asyncio = ">=0.23"
+pytest-mock = ">=3.12"
+httpx = { version = ">=0.27", extras = ["http2"] }
+ruff = ">=0.4"
+fakeredis = ">=2.23"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "ANN", "S", "B", "A", "C4", "PT", "RUF"]
+ignore = ["ANN101", "ANN102", "ANN401", "S101", "S311"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "S", "PT"]
+"benchmarks/**" = ["ANN", "S", "T201"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

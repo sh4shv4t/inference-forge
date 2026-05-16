@@ -1,0 +1,185 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "description": "inference-forge pipeline observability dashboard",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Throughput (API calls/min)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(inference_forge_api_calls_total[1m]) * 60",
+          "legendFormat": "calls/min ({{status}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqpm", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Latency Percentiles (ms)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.50, rate(inference_forge_latency_ms_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, rate(inference_forge_latency_ms_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.99, rate(inference_forge_latency_ms_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ms", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Failure Rate (%)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(inference_forge_api_calls_total{status!='success'}[5m]) / rate(inference_forge_api_calls_total[5m]) * 100",
+          "legendFormat": "failure %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percent", "color": {"mode": "fixed", "fixedColor": "red"}},
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Circuit Breaker State",
+      "type": "stat",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "inference_forge_circuit_breaker_state",
+          "legendFormat": "state"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "CLOSED", "color": "green"}}},
+            {"type": "value", "options": {"1": {"text": "HALF_OPEN", "color": "yellow"}}},
+            {"type": "value", "options": {"2": {"text": "OPEN", "color": "red"}}}
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 2}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Cache Hit Rate",
+      "type": "gauge",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(inference_forge_cache_hits_total[5m]) / (rate(inference_forge_cache_hits_total[5m]) + rate(inference_forge_cache_misses_total[5m])) * 100",
+          "legendFormat": "cache hit %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 20},
+              {"color": "green", "value": 50}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Tokens/sec",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(inference_forge_tokens_total[1m])",
+          "legendFormat": "tokens/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "color": {"mode": "fixed", "fixedColor": "blue"}},
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Active Jobs & Queue Depth",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "inference_forge_active_jobs",
+          "legendFormat": "active jobs"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "inference_forge_queue_depth",
+          "legendFormat": "queue depth"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["inference-forge", "sarvam-ai"],
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Inference Forge — Pipeline Dashboard",
+  "uid": "inference-forge-main",
+  "version": 1
+}

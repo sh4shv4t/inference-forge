@@ -7,7 +7,6 @@ a live Sarvam AI API key or Redis instance. The test marked with
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -157,7 +156,7 @@ class TestLiveAPI:
     """
     These tests call the real Sarvam AI API.
     Run with:  poetry run pytest tests/integration -m live -v
-    Requires SARVAM_API_KEY to be set in .env
+    Requires SARVAM_API_KEY in `.env` (loaded via pydantic-settings).
     """
 
     TICKETS = [
@@ -178,39 +177,98 @@ class TestLiveAPI:
         "I need to update my billing address.",
     ]
 
-    async def test_live_pipeline_10_tickets(self) -> None:
-        import os
+    def test_live_pipeline_mini(self) -> None:
+        """Few tickets against real Sarvam API; uses Starlette TestClient so lifespan runs."""
+        import time
 
-        if not os.getenv("SARVAM_API_KEY"):
-            pytest.skip("SARVAM_API_KEY not set")
+        from starlette.testclient import TestClient
 
-        from httpx import AsyncClient, ASGITransport
+        from inference_forge.config import settings
         from inference_forge.main import app
 
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.post("/process", json={"tickets": self.TICKETS})
+        if not settings.sarvam_api_key or settings.sarvam_api_key.strip() in (
+            "",
+            "your_key_here",
+        ):
+            pytest.skip("SARVAM_API_KEY not set in .env")
+
+        tickets = self.TICKETS[:3]
+
+        with TestClient(app) as client:
+            response = client.post("/process", json={"tickets": tickets})
             assert response.status_code == 202
             job_id = response.json()["job_id"]
 
-            # Poll for completion
-            for _ in range(30):
-                await asyncio.sleep(2)
-                result = await client.get(f"/results/{job_id}")
+            done = False
+            for _ in range(90):
+                time.sleep(1)
+                result = client.get(f"/results/{job_id}")
                 if result.json().get("status") == "done":
+                    done = True
                     break
 
-            final = await client.get(f"/results/{job_id}")
+            assert done, "job did not finish within timeout"
+
+            final = client.get(f"/results/{job_id}")
+            data = final.json()
+            assert data["status"] == "done"
+            assert data["results"] is not None
+            assert len(data["results"]) == len(tickets)
+
+            for r in data["results"]:
+                if r.get("error") is None:
+                    assert r["category"] in {
+                        "billing",
+                        "technical",
+                        "account",
+                        "feature_request",
+                        "other",
+                    }
+                    assert r["priority"] in {"low", "medium", "high", "critical"}
+
+    def test_live_pipeline_10_tickets(self) -> None:
+        """Full 10-ticket live run (slower, higher API usage)."""
+        import time
+
+        from starlette.testclient import TestClient
+
+        from inference_forge.config import settings
+        from inference_forge.main import app
+
+        if not settings.sarvam_api_key or settings.sarvam_api_key.strip() in (
+            "",
+            "your_key_here",
+        ):
+            pytest.skip("SARVAM_API_KEY not set in .env")
+
+        with TestClient(app) as client:
+            response = client.post("/process", json={"tickets": self.TICKETS})
+            assert response.status_code == 202
+            job_id = response.json()["job_id"]
+
+            done = False
+            for _ in range(120):
+                time.sleep(2)
+                result = client.get(f"/results/{job_id}")
+                if result.json().get("status") == "done":
+                    done = True
+                    break
+
+            assert done, "job did not finish within timeout"
+
+            final = client.get(f"/results/{job_id}")
             data = final.json()
             assert data["status"] == "done"
             assert data["results"] is not None
             assert len(data["results"]) == len(self.TICKETS)
 
-            # Validate result schema
             for r in data["results"]:
                 if r.get("error") is None:
                     assert r["category"] in {
-                        "billing", "technical", "account", "feature_request", "other"
+                        "billing",
+                        "technical",
+                        "account",
+                        "feature_request",
+                        "other",
                     }
                     assert r["priority"] in {"low", "medium", "high", "critical"}

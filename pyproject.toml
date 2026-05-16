@@ -34,6 +34,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "live: exercises real Sarvam HTTP API (needs SARVAM_API_KEY and Redis)",
+]
 
 [tool.ruff]
 line-length = 100

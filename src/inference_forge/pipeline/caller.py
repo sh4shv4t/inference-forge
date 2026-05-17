@@ -33,7 +33,36 @@ FATAL_STATUS_CODES = {400, 401, 403, 422}
 # Errors eligible for retry
 RETRYABLE_STATUS_CODES = {429, 500, 503}
 
-_BACKOFF_SCHEDULE = [1.0, 2.0, 4.0]
+_rate_limit_lock = asyncio.Lock()
+_last_call_ts = 0.0
+
+
+def _backoff_for_attempt(attempt: int) -> float:
+    return settings.retry_backoff_base * (2 ** (attempt - 1))
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """
+    Best-effort extraction of the first JSON object from a text response.
+
+    This guards against model responses that wrap JSON with extra text.
+    """
+    start = text.find("{")
+    if start == -1:
+        raise json.JSONDecodeError("No JSON object found", text, 0)
+
+    depth = 0
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : idx + 1]
+                return json.loads(candidate)
+
+    raise json.JSONDecodeError("Unterminated JSON object", text, start)
 
 
 def _jittered(base: float) -> float:
@@ -54,6 +83,18 @@ async def _single_api_call(
     Raises httpx.HTTPStatusError on bad status codes (caller decides retry).
     Raises json.JSONDecodeError if model output is not valid JSON.
     """
+    if settings.sarvam_mock_mode:
+        if settings.sarvam_mock_latency_ms > 0:
+            await asyncio.sleep(settings.sarvam_mock_latency_ms / 1000.0)
+        return (
+            {
+                "category": "other",
+                "priority": "low",
+                "summary": "Mock classification response.",
+            },
+            0,
+        )
+
     payload = {
         "model": settings.sarvam_model,
         "messages": [
@@ -63,7 +104,20 @@ async def _single_api_call(
         "max_tokens": 256,
         "temperature": 0.2,
         "reasoning_effort": "low",
+        # Encourage the API to return strict JSON.
+        "response_format": {"type": "json_object"},
     }
+
+    # Optional global throttle to avoid upstream rate limits.
+    if settings.sarvam_min_interval_ms > 0:
+        min_interval = settings.sarvam_min_interval_ms / 1000.0
+        async with _rate_limit_lock:
+            global _last_call_ts
+            now = time.monotonic()
+            wait = min_interval - (now - _last_call_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _last_call_ts = time.monotonic()
 
     start = time.monotonic()
     response = await client.post(
@@ -91,7 +145,10 @@ async def _single_api_call(
     total_tokens = data.get("usage", {}).get("total_tokens", 0)
 
     # May raise json.JSONDecodeError → eligible for retry
-    result = json.loads(content)
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        result = _extract_json_object(content)
 
     record_latency(elapsed_ms)
     record_api_call(status="success", model=settings.sarvam_model, token_count=total_tokens)
@@ -112,9 +169,12 @@ async def _call_with_retry(
 
     for attempt in range(1, settings.max_retries + 1):
         try:
-            result, tokens = await circuit_breaker.call(
-                _single_api_call, client, ticket, attempt
-            )
+            if settings.cb_enabled:
+                result, tokens = await circuit_breaker.call(
+                    _single_api_call, client, ticket, attempt
+                )
+            else:
+                result, tokens = await _single_api_call(client, ticket, attempt)
             return {**result, "tokens": tokens}
 
         except CircuitBreakerOpenError as exc:
@@ -141,7 +201,7 @@ async def _call_with_retry(
 
             if status_code == 429 and attempt < settings.max_retries:
                 retry_after = exc.response.headers.get("Retry-After")
-                wait = float(retry_after) if retry_after else _jittered(_BACKOFF_SCHEDULE[attempt - 1])
+                wait = float(retry_after) if retry_after else _jittered(_backoff_for_attempt(attempt))
                 logger.warning(
                     "rate_limited",
                     ticket_hash=ticket_hash(ticket),
@@ -152,7 +212,7 @@ async def _call_with_retry(
                 continue
 
             if status_code in RETRYABLE_STATUS_CODES and attempt < settings.max_retries:
-                wait = _jittered(_BACKOFF_SCHEDULE[attempt - 1])
+                wait = _jittered(_backoff_for_attempt(attempt))
                 await asyncio.sleep(wait)
                 last_exc = exc
                 continue
@@ -168,7 +228,7 @@ async def _call_with_retry(
                 attempt=attempt,
             )
             if attempt < settings.max_retries:
-                wait = _jittered(_BACKOFF_SCHEDULE[attempt - 1])
+                wait = _jittered(_backoff_for_attempt(attempt))
                 await asyncio.sleep(wait)
             last_exc = exc
 
@@ -180,7 +240,7 @@ async def _call_with_retry(
             )
             last_exc = exc
             if attempt < settings.max_retries:
-                wait = _jittered(_BACKOFF_SCHEDULE[attempt - 1])
+                wait = _jittered(_backoff_for_attempt(attempt))
                 await asyncio.sleep(wait)
 
     logger.error(
@@ -235,14 +295,28 @@ class SarvamCaller:
             result = await _call_with_retry(self._client, ticket)
 
         if result.get("error") is None:
-            await self._cache.set(ticket, {k: v for k, v in result.items() if k != "tokens"})
+            to_store = {k: v for k, v in result.items() if k not in ("cache_hit",)}
+            await self._cache.set(ticket, to_store)
 
         return {**result, "cache_hit": False}
 
     async def process_batch(self, tickets: list[str]) -> list[dict[str, Any]]:
-        """Process a batch of tickets concurrently using asyncio.gather."""
+        """Process a batch concurrently; one ticket failing must not abort the whole batch."""
         tasks = [self.process_ticket(t) for t in tickets]
-        return list(await asyncio.gather(*tasks, return_exceptions=False))
+        raw = await asyncio.gather(*tasks, return_exceptions=True)
+        out: list[dict[str, Any]] = []
+        for ticket, item in zip(tickets, raw, strict=True):
+            if isinstance(item, BaseException):
+                logger.exception(
+                    "ticket_processing_failed",
+                    ticket_preview=ticket[:120],
+                    exc_type=type(item).__name__,
+                )
+                err_msg = f"{type(item).__name__}: {item}"
+                out.append(_failure_result(ticket, err_msg[:500]))
+            else:
+                out.append(item)
+        return out
 
 
 def build_http_client() -> httpx.AsyncClient:

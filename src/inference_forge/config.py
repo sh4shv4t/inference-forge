@@ -18,6 +18,17 @@ class Settings(BaseSettings):
         default="https://api.sarvam.ai/v1", description="Sarvam AI base URL"
     )
     sarvam_model: str = Field(default="sarvam-m", description="Model to use for inference")
+    sarvam_min_interval_ms: int = Field(
+        default=0,
+        ge=0,
+        description="Minimum delay between Sarvam API calls in milliseconds",
+    )
+    sarvam_mock_mode: bool = Field(default=False, description="Use mock responses")
+    sarvam_mock_latency_ms: int = Field(
+        default=0,
+        ge=0,
+        description="Mock response latency in milliseconds",
+    )
 
     # Redis
     redis_url: str = Field(default="redis://localhost:6379/0", description="Redis connection URL")
@@ -37,6 +48,7 @@ class Settings(BaseSettings):
     cb_recovery_timeout: int = Field(
         default=30, ge=5, description="Seconds before attempting HALF_OPEN probe"
     )
+    cb_enabled: bool = Field(default=True, description="Enable circuit breaker")
 
     # Retry
     max_retries: int = Field(default=3, ge=1, le=5, description="Max attempts per API call")

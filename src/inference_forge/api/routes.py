@@ -71,6 +71,7 @@ async def _process_job(
     unique_tickets: list[str],
     total_tickets: int,
     pre_cached: int,
+    pre_cached_results: list[dict[str, Any]],
     job_store: JobStore,
     cache: DeduplicationCache,
     caller: Any,
@@ -87,13 +88,15 @@ async def _process_job(
 
     await job_store.start(job_id)
 
-    all_results: list[dict[str, Any]] = []
+    # Tickets satisfied from Redis at POST time (already counted in `pre_cached`).
+    all_results: list[dict[str, Any]] = [dict(r) for r in pre_cached_results]
     completed = pre_cached  # cache hits are already "done"
     failed_count = 0
     cache_hits_in_job = pre_cached
 
     try:
-        while not batcher.empty:
+        # Drain until queue empty (avoid trusting Queue.empty() alone at loop head).
+        while True:
             batch: Batch | None = await batcher.drain_batch()
             if batch is None:
                 break
@@ -111,7 +114,7 @@ async def _process_job(
             batch_failed = 0
             batch_cache_hits = 0
 
-            for ticket, result in zip(batch.tickets, batch_results):
+            for ticket, result in zip(batch.tickets, batch_results, strict=True):
                 result["ticket"] = ticket
                 all_results.append(result)
                 if result.get("error"):
@@ -155,7 +158,6 @@ async def _process_job(
 
         # Build final stats
         duration = time.monotonic() - job_start
-        summary = get_summary()
         total_tokens = sum(r.get("tokens", 0) for r in all_results)
         failure_rate = failed_count / total_tickets if total_tickets else 0.0
         cache_hit_rate = cache_hits_in_job / total_tickets if total_tickets else 0.0
@@ -260,6 +262,7 @@ async def process_tickets(body: ProcessRequest, request: Request) -> ProcessResp
             unique_tickets=unique_tickets,
             total_tickets=total,
             pre_cached=cached_count,
+            pre_cached_results=pre_cached_results,
             job_store=job_store,
             cache=cache,
             caller=caller,
@@ -360,6 +363,17 @@ async def get_results(job_id: str, request: Request) -> ResultsResponse:
     if status == "done":
         results = await job_store.get_results(job_id)
         return ResultsResponse(status="done", results=results)
+
+    if status == "failed":
+        total = int(state.get("total", 1))
+        completed = int(state.get("completed", 0))
+        progress = round(completed / total, 4) if total else 0.0
+        reason = state.get("error", "") or "unknown_error"
+        return ResultsResponse(
+            status="failed",
+            progress=progress,
+            stats={"reason": reason},
+        )
 
     total = int(state.get("total", 1))
     completed = int(state.get("completed", 0))

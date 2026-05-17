@@ -2,9 +2,19 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-# Settings() loads at import time; tests must not require a real .env file.
-os.environ.setdefault("SARVAM_API_KEY", "test-key-for-pytest")
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Settings() loads `.env` via pydantic-settings. Avoid putting a placeholder key into
+# os.environ when `.env` exists — env vars override env_file and would mask the real key.
+if "SARVAM_API_KEY" not in os.environ and not (_PROJECT_ROOT / ".env").exists():
+    os.environ["SARVAM_API_KEY"] = "test-key-for-pytest"
+
+# Overrides from developer .env / shell so mocked unit tests stay deterministic.
+os.environ["SARVAM_MOCK_MODE"] = "false"
+os.environ["CB_ENABLED"] = "true"
+os.environ["SARVAM_MIN_INTERVAL_MS"] = "0"
 
 import asyncio
 import json

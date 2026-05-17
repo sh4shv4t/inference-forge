@@ -30,12 +30,56 @@ from rich.table import Table
 # ---------------------------------------------------------------------------
 
 BASE_URL = os.getenv("BENCHMARK_BASE_URL", "http://localhost:8000")
-TOTAL_TICKETS = 200
 DUPLICATE_RATIO = 0.25
-CONCURRENCY_LEVELS = [2, 5, 10, 15, 20]
-POLL_INTERVAL = 0.5
-MAX_WAIT_S = 300
 COST_PER_1K_TOKENS = 0.0002
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _env_int_list(name: str, default: list[int]) -> list[int]:
+    value = os.getenv(name)
+    if not value:
+        return default
+    levels: list[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            level = int(item)
+        except ValueError:
+            continue
+        if level > 0:
+            levels.append(level)
+    return levels or default
+
+
+TOTAL_TICKETS = _env_int("BENCHMARK_TOTAL_TICKETS", 20)
+CONCURRENCY_LEVELS = _env_int_list(
+    "BENCHMARK_CONCURRENCY_LEVELS", [2, 5, 10, 15, 20]
+)
+POLL_INTERVAL = _env_float("BENCHMARK_POLL_INTERVAL", 0.5)
+MAX_WAIT_S = _env_int("BENCHMARK_MAX_WAIT_S", 1800)
+CB_COOLDOWN_S = _env_int("BENCHMARK_CB_COOLDOWN_S", 120)
+WARMUP_ENABLED = os.getenv("BENCHMARK_WARMUP", "1") == "1"
 
 console = Console()
 
@@ -215,17 +259,29 @@ async def run_single_benchmark(
         job_data = resp.json()
         job_id = job_data["job_id"]
 
-        # Poll until done
+        # Poll until done or failed
         deadline = time.monotonic() + MAX_WAIT_S
+        last_payload: dict[str, Any] = {}
         while time.monotonic() < deadline:
             await asyncio.sleep(POLL_INTERVAL)
             r = await client.get(f"/results/{job_id}", timeout=10.0)
             if r.status_code == 200:
                 data = r.json()
-                if data.get("status") == "done":
+                last_payload = data
+                st = data.get("status")
+                if st == "done":
                     break
+                if st == "failed":
+                    reason = (data.get("stats") or {}).get("reason", "unknown_error")
+                    result.error = f"job_failed: {reason}"
+                    return result
         else:
-            result.error = "timeout"
+            hint = ""
+            if last_payload:
+                st = last_payload.get("status")
+                pr = last_payload.get("progress")
+                hint = f" (last status={st!r}, progress={pr})"
+            result.error = f"timeout after {MAX_WAIT_S}s{hint}"
             return result
 
         elapsed = time.monotonic() - t0
@@ -258,11 +314,60 @@ async def run_single_benchmark(
     return result
 
 
+async def wait_for_circuit_closed(client: httpx.AsyncClient) -> bool:
+    """Wait for the circuit breaker to close before starting a run."""
+    deadline = time.monotonic() + CB_COOLDOWN_S
+    while time.monotonic() < deadline:
+        try:
+            r = await client.get("/health", timeout=5.0)
+            if r.status_code == 200:
+                state = r.json().get("circuit_breaker")
+                if state == "CLOSED":
+                    return True
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+    return False
+
+
+async def warmup_probe(client: httpx.AsyncClient) -> bool:
+    """Send a single ticket and ensure the result has no error."""
+    resp = await client.post("/process", json={"tickets": ["Warmup ticket"]})
+    if resp.status_code != 202:
+        return False
+    job_id = resp.json().get("job_id")
+    if not job_id:
+        return False
+
+    deadline = time.monotonic() + MAX_WAIT_S
+    while time.monotonic() < deadline:
+        await asyncio.sleep(POLL_INTERVAL)
+        r = await client.get(f"/results/{job_id}")
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("status") == "failed":
+                reason = (data.get("stats") or {}).get("reason", "")
+                console.print(f"[red]Warmup job failed: {reason}[/red]")
+                return False
+            if data.get("status") == "done":
+                results = data.get("results") or []
+                return all(not item.get("error") for item in results)
+    return False
+
+
 async def main() -> None:
     console.rule("[bold blue]inference-forge Benchmark Runner")
     console.print(f"Target: [cyan]{BASE_URL}[/cyan]")
     console.print(f"Dataset: [cyan]{TOTAL_TICKETS}[/cyan] tickets (25% duplicates)")
     console.print(f"Concurrency sweep: {CONCURRENCY_LEVELS}\n")
+    console.print(
+        "[yellow]Note:[/yellow] Rows label target concurrency; for a valid semaphore sweep, "
+        "restart the API each time with [bold]MAX_CONCURRENT_API_CALLS=<level>[/bold] "
+        "(otherwise all rows measure the same server config).\n"
+    )
+    console.print(
+        f"Circuit breaker cooldown: [cyan]{CB_COOLDOWN_S}s[/cyan] between runs\n"
+    )
 
     tickets = generate_dataset()
     console.print(f"Generated [green]{len(tickets)}[/green] tickets\n")
@@ -275,12 +380,27 @@ async def main() -> None:
             r = await client.get("/health")
             r.raise_for_status()
             console.print("[green]Server is healthy. Starting benchmark...[/green]\n")
+            if r.json().get("circuit_breaker") != "CLOSED":
+                console.print("[red]Circuit breaker is open. Restart the server and retry.[/red]")
+                sys.exit(1)
         except Exception as exc:
             console.print(f"[red]Server not reachable: {exc}[/red]")
             console.print("Start the server with: [bold]make dev[/bold] or [bold]make docker-up[/bold]")
             sys.exit(1)
 
+        if WARMUP_ENABLED:
+            ok = await warmup_probe(client)
+            if not ok:
+                console.print("[red]Warmup probe failed. Aborting benchmark.[/red]")
+                sys.exit(1)
+
         for level in CONCURRENCY_LEVELS:
+            ready = await wait_for_circuit_closed(client)
+            if not ready:
+                console.print(
+                    "[red]Circuit breaker still open. Aborting benchmark.[/red]"
+                )
+                sys.exit(1)
             r = await run_single_benchmark(level, tickets, client)
             results.append(r)
             if r.error:
@@ -310,7 +430,7 @@ async def main() -> None:
         table.add_row(
             str(r.concurrency),
             f"{r.duration_s:.2f}",
-            f"{r.throughput:.2f}" + (" ★" if r == best else ""),
+            f"{r.throughput:.2f}" + (" *" if r == best else ""),
             f"{r.p95_ms:.0f}",
             f"{r.total_tokens:,}",
             f"${r.cost_usd:.4f}",
@@ -358,7 +478,7 @@ async def main() -> None:
     md = "| Concurrency | Duration (s) | Throughput (t/s) | P95 Latency (ms) | Total Tokens | Cost (USD) | Failure % | Cache Hit % |\n"
     md += "|-------------|-------------|-----------------|-----------------|-------------|-----------|----------|------------|\n"
     for r in results:
-        star = " ★" if r == best else ""
+        star = " *" if r == best else ""
         md += (
             f"| {r.concurrency}{star} | {r.duration_s:.2f} | {r.throughput:.2f} | "
             f"{r.p95_ms:.0f} | {r.total_tokens:,} | ${r.cost_usd:.4f} | "

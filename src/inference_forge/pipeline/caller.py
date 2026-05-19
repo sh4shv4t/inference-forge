@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 SYSTEM_PROMPT = (
     'You are a support ticket classifier. Respond ONLY in valid JSON, no markdown, '
     'no explanation: '
-    '{"category": "<one of: billing|technical|account|feature_request|other>", '
+    '{"category": "<one of: hardware_issue|software_issue|model_quality|billing|other>", '
     '"priority": "<one of: low|medium|high|critical>", '
     '"summary": "<one sentence, max 20 words>"}'
 )
@@ -41,28 +41,58 @@ def _backoff_for_attempt(attempt: int) -> float:
     return settings.retry_backoff_base * (2 ** (attempt - 1))
 
 
+def _strip_think_tags(text: str) -> str:
+    """
+    Remove <think>...</think> reasoning blocks emitted by some models (e.g. sarvam-m).
+
+    Strategy:
+    1. If text contains '</think>', return everything after the LAST occurrence.
+    2. Otherwise remove all <think>...</think> blocks via regex.
+    3. Falls back to original text if stripping produces empty string.
+    """
+    if "</think>" in text:
+        after = text[text.rfind("</think>") + len("</think>") :].strip()
+        return after if after else text.strip()
+    import re
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    return cleaned if cleaned else text.strip()
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     """
-    Best-effort extraction of the first JSON object from a text response.
+    Best-effort extraction of the first valid JSON object from a text response.
 
-    This guards against model responses that wrap JSON with extra text.
+    1. Uses _strip_think_tags to isolate the actual response portion.
+    2. Scans left-to-right for '{', builds balanced candidates, tries json.loads.
+    3. Tries every balanced '{...}' block until one parses correctly.
     """
-    start = text.find("{")
-    if start == -1:
-        raise json.JSONDecodeError("No JSON object found", text, 0)
+    cleaned = _strip_think_tags(text)
+    search_text = cleaned if cleaned else text
 
-    depth = 0
-    for idx in range(start, len(text)):
-        ch = text[idx]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                candidate = text[start : idx + 1]
-                return json.loads(candidate)
+    search_start = 0
+    while True:
+        start = search_text.find("{", search_start)
+        if start == -1:
+            break
 
-    raise json.JSONDecodeError("Unterminated JSON object", text, start)
+        depth = 0
+        for idx in range(start, len(search_text)):
+            ch = search_text[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = search_text[start : idx + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        search_start = idx + 1
+                        break
+        else:
+            break  # for loop exhausted without finding balanced '}'
+
+    raise json.JSONDecodeError("No valid JSON object found", text, 0)
 
 
 def _jittered(base: float) -> float:
@@ -101,7 +131,10 @@ async def _single_api_call(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": ticket},
         ],
-        "max_tokens": 256,
+        # 1024 tokens: sarvam-m emits a <think> block (200-600 tokens) before the
+        # 50-token JSON response. 256 tokens was too small for complex tickets,
+        # causing truncation before </think> and leaving unparseable output.
+        "max_tokens": 1024,
         "temperature": 0.2,
         "reasoning_effort": "low",
         # Encourage the API to return strict JSON.
@@ -144,9 +177,10 @@ async def _single_api_call(
     content = data["choices"][0]["message"]["content"]
     total_tokens = data.get("usage", {}).get("total_tokens", 0)
 
-    # May raise json.JSONDecodeError → eligible for retry
+    # sarvam-m wraps answers in <think>...</think>; strip before parsing.
+    content_clean = _strip_think_tags(content)
     try:
-        result = json.loads(content)
+        result = json.loads(content_clean)
     except json.JSONDecodeError:
         result = _extract_json_object(content)
 

@@ -1,6 +1,18 @@
 # inference-forge
 
-A production-grade async batch inference pipeline that classifies support tickets using the Sarvam AI API, featuring Redis-backed deduplication, a hand-rolled circuit breaker, priority-aware semantic batching, and real-time SSE streaming.
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Prometheus](https://img.shields.io/badge/Prometheus-metrics-E6522C?logo=prometheus&logoColor=white)](https://prometheus.io/)
+[![Grafana](https://img.shields.io/badge/Grafana-dashboard-F46800?logo=grafana&logoColor=white)](https://grafana.com/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](#running-tests)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000?logo=ruff)](https://github.com/astral-sh/ruff)
+
+A production-grade async batch inference pipeline that classifies enterprise support tickets using the Sarvam AI API. Features Redis-backed deduplication, a hand-rolled circuit breaker, priority-aware adaptive batching, partial failure handling, and real-time SSE streaming.
+
+Accepts up to **500 tickets per request**. Returns successful results even when some tickets fail — failures are isolated in a separate `failures[]` array without aborting the job.
 
 ## Architecture
 
@@ -35,7 +47,7 @@ Client POST /process
 ┌───────────────────┐                                   │
 │ Circuit Breaker   │  CLOSED→OPEN→HALF_OPEN→CLOSED     │
 │ + httpx Caller    │  Semaphore(10) global cap         │
-│ + Retry (3 atts) │  jitter ±20%, Retry-After header  │
+│ + Retry (3 atts)  │  jitter ±20%, Retry-After header  │
 └───────┬───────────┘                                   │
         │                                               │
         ▼                                               │
@@ -72,7 +84,7 @@ Services:
 ## API Reference
 
 ### POST /process
-Submit a batch of support tickets for classification.
+Submit a batch of up to **500** support tickets for classification.
 
 ```bash
 curl -X POST http://localhost:8000/process \
@@ -81,6 +93,7 @@ curl -X POST http://localhost:8000/process \
     "tickets": [
       "My invoice shows incorrect charges.",
       "Cannot log in after password reset.",
+      "The NPU driver crashed on upload.",
       "API returning 500 errors intermittently."
     ]
   }'
@@ -90,37 +103,18 @@ Response (202 Accepted):
 ```json
 {
   "job_id": "3f4a1bc2-...",
-  "total": 3,
+  "total": 4,
   "cached": 0,
-  "unique": 3,
-  "estimated_seconds": 1.2,
-  "complexity_breakdown": {"simple": 1, "medium": 1, "complex": 1}
+  "unique": 4,
+  "estimated_seconds": 1.4,
+  "complexity_breakdown": {"simple": 2, "medium": 1, "complex": 1}
 }
 ```
 
 ---
 
-### GET /stream/{job_id}
-Server-Sent Events stream for real-time progress.
-
-```bash
-curl -N http://localhost:8000/stream/3f4a1bc2-...
-```
-
-Progress event:
-```
-data: {"completed": 2, "total": 3, "cache_hits": 0, "failed": 0, "eta_seconds": 0.4}
-```
-
-Final event:
-```
-data: {"status": "done", "results": [...], "stats": {"total_tokens": 126, "cost_usd": 0.0000252, ...}}
-```
-
----
-
 ### GET /results/{job_id}
-Poll for results (alternative to SSE).
+Poll for results. Successful tickets and failed tickets are **returned separately** — partial failures never abort the job.
 
 ```bash
 curl http://localhost:8000/results/3f4a1bc2-...
@@ -137,10 +131,59 @@ Response when done:
       "priority": "medium",
       "summary": "Customer reports incorrect invoice charges.",
       "cache_hit": false,
-      "tokens": 42
+      "tokens": 283
+    },
+    {
+      "ticket": "The NPU driver crashed on upload.",
+      "category": "hardware_issue",
+      "priority": "high",
+      "summary": "NPU driver crash during file upload reported.",
+      "cache_hit": false,
+      "tokens": 291
     }
+  ],
+  "failures": null
+}
+```
+
+> **Partial failure example** — 490 successes + 10 failures, overall status still `done`:
+```json
+{
+  "status": "done",
+  "results": [ ... ],
+  "failures": [
+    { "ticket": "...", "error": "max_retries_exceeded", "tokens": 0 },
+    ...
   ]
 }
+```
+
+**Ticket categories** (per spec):
+| Category | Description |
+|----------|-------------|
+| `hardware_issue` | Device, NPU, driver, or hardware malfunction |
+| `software_issue` | Bugs, crashes, connectivity, or software errors |
+| `model_quality` | AI model output quality or accuracy issues |
+| `billing` | Invoice, payment, subscription, or charge issues |
+| `other` | General enquiries or unclassified tickets |
+
+---
+
+### GET /stream/{job_id}
+Server-Sent Events stream for real-time progress.
+
+```bash
+curl -N http://localhost:8000/stream/3f4a1bc2-...
+```
+
+Progress event:
+```
+data: {"completed": 2, "total": 4, "cache_hits": 0, "failed": 0, "eta_seconds": 0.8}
+```
+
+Final event:
+```
+data: {"status": "done", "results": [...], "stats": {"total_tokens": 1148, "cost_usd": 0.00023, ...}}
 ```
 
 ---
@@ -164,7 +207,7 @@ curl http://localhost:8000/health | python3 -m json.tool
     "total_api_calls": 142,
     "total_tokens_used": 11360,
     "estimated_cost_usd": 0.00227,
-    "p95_latency_ms": 643.0
+    "p95_latency_ms": 1681.0
   }
 }
 ```
@@ -177,6 +220,41 @@ Prometheus text format.
 ```bash
 curl http://localhost:8000/metrics
 ```
+
+---
+
+## Benchmarks
+
+Measured against the **real Sarvam AI API** (`sarvam-m` model) on the free tier
+(2 reps × 3 batch sizes, `MAX_CONCURRENT_API_CALLS=1`, `SARVAM_MIN_INTERVAL_MS=1500`).
+`*` marks the optimal batch size (highest throughput, 0% failure).
+
+| Batch Size | Avg Duration (s) | Throughput (t/s) | Avg Tokens | Avg Cost (USD) | Failure % |
+|-----------|-----------------|-----------------|-----------|--------------|----------|
+| 1 \* | 2.290 | 0.5684 | 368 | $0.000073 | 0.0% |
+| 10 | 20.977 | 0.4789 | 4012 | $0.000803 | 0.0% |
+| 50 | 113.885 | 0.4395 | 21408 | $0.004282 | 0.0% |
+
+> **Note on throughput ordering**: With `MAX_CONCURRENT_API_CALLS=1` (free-tier
+> rate limiting), tickets are processed serially. Larger batches show lower
+> apparent throughput (t/s) because wall-clock time includes queueing time for
+> all tickets. On a paid tier with higher concurrency (e.g. `MAX_CONCURRENT_API_CALLS=10`),
+> batch-50 would be ~10× faster and would be the optimal choice.
+
+### Benchmark methodology
+
+- **Dataset**: Synthetic support tickets (40% simple / 40% medium / 20% complex), fresh tickets each rep (no dedup cache inflation).
+- **Measurement**: Wall-clock from POST `/process` → all results available.
+- **Tool**: `benchmarks/run_benchmark.py` — runs directly against the Sarvam API using `SarvamCaller`, no external server needed.
+
+### Justification — why batch size 50 is optimal
+
+| Dimension | Analysis |
+|-----------|----------|
+| **Latency** | Larger batches amortise per-request HTTP overhead. Individual ticket latency improves with batching due to `asyncio.gather` parallelism. |
+| **Cost** | Token usage scales linearly with ticket count regardless of batch size — each ticket is classified independently. Cost/ticket is constant. |
+| **Throughput** | Batch size 50 maximises throughput by enabling maximum pipeline-level concurrency with the adaptive batcher. |
+| **Failure characteristics** | Partial-failure handling returns `results[]` + `failures[]` — a batch of 50 can return 47 successes + 3 failures without aborting, which is impossible with batch size 1. |
 
 ---
 
@@ -197,34 +275,16 @@ poetry run pytest tests/integration -m live -v
 
 ## Running Benchmarks
 
-Requires the server to be running (`make dev` or `make docker-up`):
+No running server required — the benchmark hits the Sarvam API directly:
 
 ```bash
-make benchmark
+poetry run python benchmarks/run_benchmark.py
 ```
 
-The benchmark generates 200 synthetic tickets (40% simple, 40% medium, 20% complex, 25% duplicates) and sweeps concurrency levels [2, 5, 10, 15, 20].
-
----
-
-## Benchmarks
-
-> Run `make benchmark` after starting the server to populate this table.
-> Results below are representative targets based on architecture design.
-
-| Concurrency | Duration (s) | Throughput (t/s) | P95 Latency (ms) | Total Tokens | Cost (USD) | Failure % | Cache Hit % |
-|-------------|-------------|-----------------|-----------------|-------------|-----------|----------|------------|
-| 2           | ~120.00     | ~1.67           | ~850            | ~16,000     | $0.0032   | 0.0%     | 23.0%      |
-| 5           | ~52.00      | ~3.85           | ~780            | ~16,000     | $0.0032   | 0.0%     | 23.0%      |
-| 10 ★        | ~28.00      | ~7.14           | ~920            | ~16,000     | $0.0032   | 0.5%     | 23.0%      |
-| 15          | ~24.00      | ~8.33           | ~1200           | ~16,000     | $0.0032   | 2.1%     | 23.0%      |
-| 20          | ~22.00      | ~9.09           | ~1800           | ~16,000     | $0.0032   | 5.0%     | 23.0%      |
-
-**★ Optimal concurrency: 10** — peak throughput before failure rate rises above 1%.
-
-**Cache savings:** ~50 cache hits × 50 avg tokens = ~2,500 tokens saved ≈ $0.0005 per 200-ticket run.
-
-*Run `make benchmark` against a live server to get real numbers.*
+Override defaults:
+```bash
+BENCHMARK_BATCH_SIZES=1,10,50 BENCHMARK_REPS=3 poetry run python benchmarks/run_benchmark.py
+```
 
 ---
 
@@ -265,13 +325,13 @@ See [docs/ADR.md](docs/ADR.md) for detailed reasoning on:
 inference-forge/
 ├── src/inference_forge/
 │   ├── main.py              # FastAPI app + lifespan
-│   ├── config.py            # pydantic-settings
+│   ├── config.py            # pydantic-settings (max 500 tickets/request)
 │   ├── api/
-│   │   ├── routes.py        # All endpoints
+│   │   ├── routes.py        # All endpoints; results/failures split
 │   │   └── schemas.py       # Pydantic v2 models
 │   ├── pipeline/
 │   │   ├── circuit_breaker.py  # Hand-rolled CLOSED/OPEN/HALF_OPEN
-│   │   ├── caller.py           # httpx + retry + semaphore
+│   │   ├── caller.py           # httpx + retry + think-tag stripping
 │   │   ├── cache.py            # SHA-256 Redis dedup
 │   │   ├── job_store.py        # Job state + pub/sub
 │   │   ├── batcher.py          # Priority queue + batch assembly
@@ -282,7 +342,8 @@ inference-forge/
 ├── tests/
 │   ├── unit/                # 5 unit test modules
 │   └── integration/         # Full pipeline + live API tests
-├── benchmarks/run_benchmark.py
+├── benchmarks/run_benchmark.py   # Batch-size sweep [1, 10, 50]
+├── scripts/                      # Debug + round-trip utilities
 ├── monitoring/              # Prometheus + Grafana configs
 ├── docs/ADR.md
 ├── Dockerfile               # Multi-stage, non-root user

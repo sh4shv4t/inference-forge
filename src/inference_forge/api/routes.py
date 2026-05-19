@@ -361,8 +361,14 @@ async def get_results(job_id: str, request: Request) -> ResultsResponse:
     status = state.get("status", "pending")
 
     if status == "done":
-        results = await job_store.get_results(job_id)
-        return ResultsResponse(status="done", results=results)
+        all_results = await job_store.get_results(job_id)
+        successes = [r for r in all_results if not r.get("error")]
+        failures = [r for r in all_results if r.get("error")]
+        return ResultsResponse(
+            status="done",
+            results=successes,
+            failures=failures if failures else None,
+        )
 
     if status == "failed":
         total = int(state.get("total", 1))

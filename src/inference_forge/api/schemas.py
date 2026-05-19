@@ -57,13 +57,24 @@ class ProcessResponse(BaseModel):
     complexity_breakdown: ComplexityBreakdownSchema
 
 
+VALID_CATEGORIES = frozenset(
+    {"hardware_issue", "software_issue", "model_quality", "billing", "other"}
+)
+VALID_PRIORITIES = frozenset({"low", "medium", "high", "critical"})
+
+
 class TicketResult(BaseModel):
     ticket: str | None = None
-    category: str | None = None
-    priority: str | None = None
+    category: str | None = None  # hardware_issue | software_issue | model_quality | billing | other
+    priority: str | None = None  # low | medium | high | critical
     summary: str | None = None
-    error: str | None = None
     cache_hit: bool = False
+    tokens: int = 0
+
+
+class FailedTicket(BaseModel):
+    ticket: str | None = None
+    error: str
     tokens: int = 0
 
 
@@ -88,6 +99,7 @@ class ResultsResponse(BaseModel):
     status: str
     progress: float | None = None
     results: list[dict[str, Any]] | None = None
+    failures: list[dict[str, Any]] | None = None
     stats: dict[str, Any] | None = None
 
 

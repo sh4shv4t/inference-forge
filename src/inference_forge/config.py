@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     job_ttl_seconds: int = Field(default=3600, description="Job state TTL (1 hour)")
 
     # Validation limits
-    max_tickets_per_request: int = Field(default=1000, description="Max tickets per /process call")
+    max_tickets_per_request: int = Field(default=500, description="Max tickets per /process call")
     max_ticket_chars: int = Field(default=2000, description="Max characters per ticket")
 
     # Observability
